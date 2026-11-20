@@ -379,11 +379,11 @@ static void frame_cb(ChiakiFfmpegDecoder *decoder, void *user)
 		}
 		if(s->vsr && s->rgba && vsr_process(s->vsr, s->nv12, flags & NAGITO_FRAME_FULL_RANGE, flags & NAGITO_FRAME_BT601, s->rgba) == 0)
 		{
-			s->cb.video(s->cb.user, s->rgba, ow, oh, NAGITO_FRAME_RGBA);
+			s->cb.video(s->cb.user, s->rgba, ow, oh, NAGITO_FRAME_RGBA, w, h);
 			goto done;
 		}
 	}
-	s->cb.video(s->cb.user, s->nv12, w, h, flags);
+	s->cb.video(s->cb.user, s->nv12, w, h, flags, w, h);
 done:
 	av_frame_free(&sw);
 	av_frame_free(&f.frame);

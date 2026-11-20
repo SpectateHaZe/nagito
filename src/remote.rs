@@ -72,7 +72,7 @@ struct RawStats {
 #[repr(C)]
 struct RawCallbacks {
     user: *mut c_void,
-    video: extern "C" fn(*mut c_void, *const u8, i32, i32, i32),
+    video: extern "C" fn(*mut c_void, *const u8, i32, i32, i32, i32, i32),
     audio: extern "C" fn(*mut c_void, *const i16, usize, i32, i32),
     event: extern "C" fn(*mut c_void, i32, i32, *const c_char),
 }
@@ -329,7 +329,7 @@ pub struct Stream {
 const AUDIO_RATE: u32 = 48_000;
 const AUDIO_CH: usize = 2;
 
-extern "C" fn on_video(user: *mut c_void, nv12: *const u8, w: i32, h: i32, flags: i32) {
+extern "C" fn on_video(user: *mut c_void, nv12: *const u8, w: i32, h: i32, flags: i32, src_w: i32, src_h: i32) {
     let s = unsafe { &*(user as *const StreamState) };
     let (w, h) = (w as u32, h as u32);
     let rgba = flags & 4 != 0; // already upscaled by RTX Video
@@ -341,9 +341,7 @@ extern "C" fn on_video(user: *mut c_void, nv12: *const u8, w: i32, h: i32, flags
         let mut win = s.fps_window.lock().unwrap();
         win.0 += 1;
         let mut st = s.slot.stats.lock().unwrap();
-        if !rgba {
-            (st.width, st.height) = (w, h); // the stream's own size, not the upscaled one
-        }
+        (st.width, st.height) = (src_w as u32, src_h as u32); // the stream's own size, even when upscaled
         if win.1.elapsed() >= Duration::from_secs(1) {
             st.source_fps = win.0 as f32 / win.1.elapsed().as_secs_f32();
             *win = (0, Instant::now());

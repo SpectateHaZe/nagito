@@ -65,8 +65,9 @@ typedef struct NagitoStats {
 
 typedef struct NagitoCallbacks {
 	void *user;
-	// NV12: width*height luma bytes, then width*height/2 interleaved chroma bytes.
-	void (*video)(void *user, const uint8_t *nv12, int width, int height, int flags);
+	// NV12: width*height luma bytes, then width*height/2 interleaved chroma bytes. With NAGITO_FRAME_RGBA the
+	// frame is RGBA at width x height, upscaled from the stream's src_width x src_height.
+	void (*video)(void *user, const uint8_t *data, int width, int height, int flags, int src_width, int src_height);
 	void (*audio)(void *user, const int16_t *pcm, size_t frames, int channels, int rate);
 	void (*event)(void *user, int kind, int value, const char *text);
 } NagitoCallbacks;
