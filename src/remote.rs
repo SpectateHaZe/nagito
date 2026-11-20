@@ -83,7 +83,8 @@ type RegistCb = extern "C" fn(*mut c_void, i32, *const RawRegistered);
 #[link(name = "nagito_rp")]
 unsafe extern "C" {
     fn nagito_init() -> i32;
-    fn nagito_discovery_start(cb: HostsCb, user: *mut c_void) -> *mut c_void;
+    fn nagito_discovery_start(cb: HostsCb, user: *mut c_void, extra: *const *const c_char, extra_count: i32) -> *mut c_void;
+    fn nagito_upnp_forward(console_ip: *const c_char, external_ip: *mut c_char, size: usize) -> i32;
     fn nagito_discovery_stop(d: *mut c_void);
     fn nagito_wakeup(host: *const c_char, regist_key: *const u8, ps5: i32) -> i32;
     fn nagito_regist_start(host: *const c_char, ps5: i32, account_id: *const u8, pin: u32, cb: RegistCb, user: *mut c_void) -> *mut c_void;
@@ -136,6 +137,43 @@ pub struct Linked {
     pub ps5: bool,
     pub regist_key: [u8; 16],
     pub rp_key: [u8; 16],
+    /// The owner's PSN account ID, for a console a friend shared; None means use ours.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Reached over the internet through a friend's invite.
+    #[serde(default)]
+    pub shared: bool,
+}
+
+const INVITE_PREFIX: &str = "nagito://play/";
+
+/// An invite link holding everything needed to stream from `console`, including its keys.
+pub fn invite(console: &Linked, public_addr: &str, account_id: &str) -> String {
+    use base64::Engine;
+    let shared = Linked { addr: public_addr.trim().to_owned(), account_id: Some(account_id.trim().to_owned()), shared: true, ..console.clone() };
+    let json = serde_json::to_vec(&shared).unwrap_or_default();
+    format!("{INVITE_PREFIX}{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json))
+}
+
+/// Reads an invite pasted from a chat app, which may wrap it in <> or spaces.
+pub fn parse_invite(text: &str) -> Option<Linked> {
+    use base64::Engine;
+    let code = text.trim().trim_matches(['<', '>', '`']).trim();
+    let code = code.strip_prefix(INVITE_PREFIX).unwrap_or(code);
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(code.trim_end_matches('=')).ok()?;
+    let l: Linked = serde_json::from_slice(&json).ok()?;
+    (!l.addr.is_empty() && l.account_id.as_deref().and_then(parse_account_id).is_some()).then_some(Linked { shared: true, ..l })
+}
+
+/// Opens the PS5's Remote Play ports on the router. Returns (ports opened of 5, or -1 without UPnP; public IP).
+pub fn upnp_forward(console_ip: &str) -> (i32, String) {
+    let Ok(ip) = CString::new(console_ip) else { return (-1, String::new()) };
+    if !init() {
+        return (-1, String::new());
+    }
+    let mut ext = [0 as c_char; 64];
+    let n = unsafe { nagito_upnp_forward(ip.as_ptr(), ext.as_mut_ptr(), ext.len()) };
+    (n, text(&ext))
 }
 
 /// Decodes the base64 PSN account ID the console needs for linking and streaming.
@@ -179,12 +217,15 @@ extern "C" fn on_hosts(user: *mut c_void, hosts: *const RawHost, count: i32) {
 }
 
 impl Discovery {
-    pub fn start(repaint: impl Fn() + Send + Sync + 'static) -> Option<Self> {
+    /// `extra`: addresses beyond this network to ping too (consoles shared over the internet).
+    pub fn start(extra: &[String], repaint: impl Fn() + Send + Sync + 'static) -> Option<Self> {
         if !init() {
             return None;
         }
         let state = Arc::new(DiscoveryState { hosts: Mutex::new(vec![]), repaint: Box::new(repaint) });
-        let raw = unsafe { nagito_discovery_start(on_hosts, Arc::as_ptr(&state) as *mut c_void) };
+        let extra: Vec<CString> = extra.iter().filter_map(|a| CString::new(a.trim()).ok()).collect();
+        let ptrs: Vec<*const c_char> = extra.iter().map(|c| c.as_ptr()).collect();
+        let raw = unsafe { nagito_discovery_start(on_hosts, Arc::as_ptr(&state) as *mut c_void, ptrs.as_ptr(), ptrs.len() as i32) };
         (!raw.is_null()).then_some(Self { raw, state })
     }
 
@@ -417,5 +458,16 @@ mod tests {
         assert_eq!(super::parse_account_id("AQIDBAUGBwg="), Some([1, 2, 3, 4, 5, 6, 7, 8]));
         assert_eq!(super::parse_account_id("AQID"), None);
         assert_eq!(super::parse_account_id("not base64!"), None);
+    }
+
+    #[test]
+    fn invite_round_trips() {
+        let c = super::Linked { name: "PS5".into(), host_id: "ABC".into(), addr: "192.168.1.2".into(), ps5: true, regist_key: [1; 16], rp_key: [2; 16], account_id: None, shared: false };
+        let link = super::invite(&c, " 203.0.113.9 ", "AQIDBAUGBwg=");
+        let got = super::parse_invite(&format!("<{link}>")).unwrap();
+        assert_eq!(got.addr, "203.0.113.9");
+        assert_eq!((got.regist_key, got.rp_key, got.shared), (c.regist_key, c.rp_key, true));
+        assert_eq!(got.account_id.as_deref(), Some("AQIDBAUGBwg="));
+        assert!(super::parse_invite("nagito://play/garbage").is_none());
     }
 }

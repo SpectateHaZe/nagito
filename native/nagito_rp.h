@@ -74,12 +74,17 @@ typedef void (*NagitoRegistCb)(void *user, int ok, const NagitoRegistered *host)
 
 NAGITO_API int nagito_init(void);
 
-NAGITO_API void *nagito_discovery_start(NagitoHostsCb cb, void *user);
+// extra: addresses outside this network (shared consoles) to ping as well.
+NAGITO_API void *nagito_discovery_start(NagitoHostsCb cb, void *user, const char *const *extra, int extra_count);
 NAGITO_API void nagito_discovery_stop(void *discovery);
 NAGITO_API int nagito_wakeup(const char *host, const char regist_key[16], int ps5);
 
 NAGITO_API void *nagito_regist_start(const char *host, int ps5, const uint8_t account_id[8], uint32_t pin, NagitoRegistCb cb, void *user);
 NAGITO_API void nagito_regist_free(void *regist);
+
+// Asks the router (UPnP) to forward the PS5 Remote Play ports to console_ip. Returns how many of the
+// 5 mappings succeeded, or -1 when no UPnP router answered. external_ip gets the public address if known.
+NAGITO_API int nagito_upnp_forward(const char *console_ip, char *external_ip, size_t external_ip_size);
 
 NAGITO_API void *nagito_stream_start(const NagitoStreamConfig *cfg, const NagitoCallbacks *cb, char *err, size_t err_size);
 NAGITO_API void nagito_stream_stop(void *stream);

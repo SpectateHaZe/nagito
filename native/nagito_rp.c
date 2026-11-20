@@ -1,4 +1,4 @@
-﻿// nagito Remote Play shim: chiaki-ng session + ffmpeg decode + Opus audio + SDL2 DualSense input.
+// nagito Remote Play shim: chiaki-ng session + ffmpeg decode + Opus audio + SDL2 DualSense input.
 #define SDL_MAIN_HANDLED
 #include "nagito_rp.h"
 
@@ -17,6 +17,9 @@
 #include <SDL.h>
 #include <winsock2.h>
 #include <iphlpapi.h>
+#include <ws2tcpip.h>
+#include <miniupnpc/miniupnpc.h>
+#include <miniupnpc/upnpcommands.h>
 #include <libavutil/hwcontext.h>
 #include <libswscale/swscale.h>
 #include <stdio.h>
@@ -64,7 +67,7 @@ static void discovery_cb(ChiakiDiscoveryHost *hosts, size_t count, void *user)
 	d->cb(d->user, out, n);
 }
 
-NAGITO_API void *nagito_discovery_start(NagitoHostsCb cb, void *user)
+NAGITO_API void *nagito_discovery_start(NagitoHostsCb cb, void *user, const char *const *extra, int extra_count)
 {
 	Discovery *d = calloc(1, sizeof(Discovery));
 	if(!d)
@@ -80,7 +83,7 @@ NAGITO_API void *nagito_discovery_start(NagitoHostsCb cb, void *user)
 	opt.cb = discovery_cb;
 	opt.cb_user = d;
 	// Windows sends 255.255.255.255 out of one adapter only, so also broadcast on every IPv4 subnet.
-	struct sockaddr_storage bcast[16];
+	struct sockaddr_storage bcast[32];
 	size_t nb = 0;
 	ULONG size = 32 * 1024;
 	IP_ADAPTER_ADDRESSES *aa = malloc(size);
@@ -105,6 +108,18 @@ NAGITO_API void *nagito_discovery_start(NagitoHostsCb cb, void *user)
 		}
 	}
 	free(aa);
+	// Shared consoles over the internet: ping their public address directly (port 9302 is forwarded).
+	for(int i = 0; i < extra_count && nb < 32; i++)
+	{
+		struct addrinfo hints = {0}, *res = NULL;
+		hints.ai_family = AF_INET;
+		hints.ai_socktype = SOCK_DGRAM;
+		if(getaddrinfo(extra[i], NULL, &hints, &res) != 0 || !res)
+			continue;
+		memset(&bcast[nb], 0, sizeof(bcast[nb]));
+		memcpy(&bcast[nb++], res->ai_addr, res->ai_addrlen);
+		freeaddrinfo(res);
+	}
 	opt.broadcast_addrs = bcast;
 	opt.broadcast_num = nb;
 	struct sockaddr_in in = {0};
@@ -199,6 +214,40 @@ NAGITO_API void nagito_regist_free(void *regist)
 	chiaki_regist_stop(&r->regist);
 	chiaki_regist_fini(&r->regist);
 	free(r);
+}
+
+/* ---------- sharing over the internet ---------- */
+
+NAGITO_API int nagito_upnp_forward(const char *console_ip, char *external_ip, size_t external_ip_size)
+{
+	copy_str(external_ip, external_ip_size, "");
+	int err = 0;
+	struct UPNPDev *devs = upnpDiscover(2000, NULL, NULL, 0, 0, 2, &err);
+	if(!devs)
+		return -1;
+	struct UPNPUrls urls;
+	struct IGDdatas data;
+	char lan_ip[64] = {0};
+	int igd = UPNP_GetValidIGD(devs, &urls, &data, lan_ip, sizeof(lan_ip), NULL, 0);
+	freeUPNPDevlist(devs);
+	if(igd != 1)
+	{
+		if(igd > 0)
+			FreeUPNPUrls(&urls);
+		return -1;
+	}
+	char ext[64] = {0};
+	if(UPNP_GetExternalIPAddress(urls.controlURL, data.first.servicetype, ext) == UPNPCOMMAND_SUCCESS)
+		copy_str(external_ip, external_ip_size, ext);
+	static const struct { const char *port, *proto; } maps[] = {
+		{"9295", "TCP"}, {"9295", "UDP"}, {"9296", "UDP"}, {"9297", "UDP"}, {"9302", "UDP"},
+	};
+	int ok = 0;
+	for(size_t i = 0; i < sizeof(maps) / sizeof(maps[0]); i++)
+		ok += UPNP_AddPortMapping(urls.controlURL, data.first.servicetype, maps[i].port, maps[i].port,
+				console_ip, "nagito PS5 Remote Play", maps[i].proto, NULL, "0") == UPNPCOMMAND_SUCCESS;
+	FreeUPNPUrls(&urls);
+	return ok;
 }
 
 /* ---------- streaming ---------- */

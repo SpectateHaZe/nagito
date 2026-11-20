@@ -179,6 +179,14 @@ struct LinkForm {
     error: Option<String>,
 }
 
+/// Hosting side of an invite: router setup runs in the background, then the link is shown.
+struct Share {
+    console: remote::Linked,
+    job: Arc<std::sync::Mutex<Option<(i32, String)>>>,
+    ports: Option<i32>,
+    addr: String,
+}
+
 enum Action {
     Play,
     Wake,
@@ -202,6 +210,9 @@ struct App {
     psn_redirect: String,
     psn_job: Option<Arc<std::sync::Mutex<Option<Result<String, String>>>>>,
     pin_entry: String,
+    invite_entry: String,
+    share: Option<Share>,
+    discovery_extra: Vec<String>,
     rebinding: Option<usize>,
     mouse_stick: egui::Vec2,
     grabbed: bool,
@@ -232,6 +243,9 @@ impl App {
             psn_redirect: String::new(),
             psn_job: None,
             pin_entry: String::new(),
+            invite_entry: String::new(),
+            share: None,
+            discovery_extra: vec![],
             rebinding: None,
             mouse_stick: egui::Vec2::ZERO,
             grabbed: false,
@@ -264,9 +278,15 @@ impl App {
             if !self.playing || self.live.as_ref().is_some_and(|l| l.key.is_some()) {
                 self.live = None;
             }
+            let extra: Vec<String> = self.s.consoles.iter().filter(|l| l.shared).map(|l| l.addr.clone()).collect();
+            if extra != self.discovery_extra {
+                self.discovery = None; // restart so shared consoles get pinged too
+                self.discovery_failed = false;
+                self.discovery_extra = extra;
+            }
             if self.discovery.is_none() && !self.discovery_failed {
                 let c = ctx.clone();
-                self.discovery = remote::Discovery::start(move || c.request_repaint());
+                self.discovery = remote::Discovery::start(&self.discovery_extra, move || c.request_repaint());
                 self.discovery_failed = self.discovery.is_none();
             }
             return;
@@ -328,6 +348,8 @@ impl App {
                 Some(c) if c.linked.is_none() => (Action::Link, "Link this console"),
                 Some(c) if c.power == Some(remote::Power::Resting) => (Action::Wake, "Wake up console"),
                 Some(c) if c.power == Some(remote::Power::Ready) => (Action::Play, "Start playing"),
+                // a friend's console may not answer pings through their router, so let the user try anyway
+                Some(c) if c.linked.as_ref().is_some_and(|l| l.shared) => (Action::Play, "Connect over the internet"),
                 Some(_) => (Action::Nothing, "Start playing"),
             },
         }
@@ -358,7 +380,8 @@ impl App {
                     self.play(ctx, true);
                     return;
                 }
-                let Some(account) = remote::parse_account_id(&self.s.account_id) else {
+                let owner = self.selected_console().and_then(|c| c.linked).and_then(|l| l.account_id);
+                let Some(account) = remote::parse_account_id(owner.as_deref().unwrap_or(&self.s.account_id)) else {
                     self.notify("Add your PSN account ID in the sidebar first.", false);
                     return;
                 };
@@ -456,6 +479,7 @@ impl App {
                     (None, _) => (format!("{} is not linked yet", c.name), false),
                     (_, Some(remote::Power::Ready)) => (format!("{} is ready", c.name), true),
                     (_, Some(remote::Power::Resting)) => (format!("{} is resting", c.name), false),
+                    (Some(l), None) if l.shared => (format!("{} is shared over the internet", c.name), true),
                     _ => (format!("{} is not on your network", c.name), false),
                 },
             };
@@ -503,6 +527,7 @@ impl App {
                         (_, Some(remote::Power::Resting)) => "It is in rest mode. Wake it up from here.".into(),
                         (_, Some(remote::Power::Ready)) if !c.app.is_empty() => format!("Playing {}. Press Enter to jump in.", c.app),
                         (_, Some(remote::Power::Ready)) => "Ready. Press Enter to start streaming.".into(),
+                        (Some(l), None) if l.shared => "A friend shared this PS5. Press Enter to connect. If it fails, the console may be off or its router ports are not open.".into(),
                         _ => "Not found on your network right now. Turn it on, or check that it is on the same network.".into(),
                     };
                     (c.name, hint)
@@ -602,6 +627,8 @@ impl App {
                             ps5: form.console.ps5,
                             regist_key,
                             rp_key,
+                            account_id: None,
+                            shared: false,
                         };
                         self.s.consoles.retain(|l| l.host_id != linked.host_id);
                         self.s.console = Some(linked.host_id.clone());
@@ -754,11 +781,29 @@ impl App {
                 (None, _) => "Not linked yet",
                 (_, Some(remote::Power::Ready)) => "Ready to play",
                 (_, Some(remote::Power::Resting)) => "Resting",
+                (Some(l), None) if l.shared => "Shared by a friend",
                 _ => "Not on your network",
             };
             if widgets::source_row(ui, selected.as_ref() == Some(&c.id), &c.name, state, c.power.is_some()).clicked() {
                 self.s.console = Some(c.id.clone());
                 self.link = None;
+            }
+        }
+        section(ui, "Friend's PS5");
+        ui.add(egui::TextEdit::singleline(&mut self.invite_entry).hint_text("Paste an invite link").desired_width(ui.available_width()));
+        if !self.invite_entry.trim().is_empty() {
+            match remote::parse_invite(&self.invite_entry) {
+                Some(l) => {
+                    let name = l.name.clone();
+                    self.s.consoles.retain(|c| c.host_id != l.host_id);
+                    self.s.console = Some(l.host_id.clone());
+                    self.s.consoles.push(l);
+                    self.invite_entry.clear();
+                    self.notify(format!("Added {name}. Over the internet, a bitrate of 10 to 20 Mbps works best."), true);
+                }
+                None => {
+                    ui.label(egui::RichText::new("That is not a nagito invite link.").size(14.0).color(FLARE));
+                }
             }
         }
         section(ui, "PSN account ID");
@@ -939,17 +984,36 @@ impl App {
                 if self.s.consoles.is_empty() {
                     note(ui, "None yet. Link a PS5 from the PlayStation 5 source.");
                 }
+                let mut invite = None;
                 for c in &self.s.consoles {
                     ui.horizontal(|ui| {
                         ui.label(&c.name);
-                        ui.label(egui::RichText::new(&c.addr).color(HAZE));
+                        ui.label(egui::RichText::new(if c.shared { "from a friend" } else { &c.addr }).color(HAZE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Forget").clicked() {
                                 forget = Some(c.host_id.clone());
                             }
+                            if !c.shared && ui.button("Invite a friend").clicked() {
+                                invite = Some(c.clone());
+                            }
                         });
                     });
                 }
+                if let Some(console) = invite {
+                    let job = Arc::new(std::sync::Mutex::new(None));
+                    let (j, ctx, ip) = (job.clone(), ui.ctx().clone(), console.addr.clone());
+                    std::thread::spawn(move || {
+                        let (n, mut ext) = remote::upnp_forward(&ip);
+                        if ext.is_empty() {
+                            // the router would not say; ask a public what-is-my-IP service
+                            ext = ureq::get("https://api.ipify.org").call().ok().and_then(|mut r| r.body_mut().read_to_string().ok()).unwrap_or_default();
+                        }
+                        *j.lock().unwrap() = Some((n, ext.trim().to_owned()));
+                        ctx.request_repaint();
+                    });
+                    self.share = Some(Share { console, job, ports: None, addr: String::new() });
+                }
+                self.share_panel(ui);
                 note(ui, "Links are saved, so you enter the PS5 code only once per console.");
                 });
             });
@@ -994,6 +1058,60 @@ impl App {
         }
         if let Some(wrong) = stats.pin {
             self.pin_prompt(ui, avail, wrong);
+        }
+    }
+
+    fn share_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(share) = self.share.as_mut() else { return };
+        let note = |ui: &mut egui::Ui, t: &str, c: Color32| {
+            ui.label(egui::RichText::new(t).size(14.0).color(c));
+        };
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(format!("Invite a friend to {}", share.console.name)).font(display(22.0)).color(PAPER));
+        if share.ports.is_none() {
+            if let Some((n, ext)) = share.job.lock().unwrap().take() {
+                share.ports = Some(n);
+                share.addr = ext;
+            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Opening your router for the PS5…");
+                });
+                ui.ctx().request_repaint_after(Duration::from_millis(150));
+                return;
+            }
+        }
+        let manual = format!("In your router settings, forward TCP 9295 and UDP 9295, 9296, 9297 and 9302 to {}.", share.console.addr);
+        match share.ports {
+            Some(5) => note(ui, "Router ports are open for your PS5.", SIGNAL),
+            Some(n) if n > 0 => note(ui, &format!("Your router opened only {n} of 5 ports. {manual}"), FLARE),
+            _ => note(ui, &format!("Your router did not let nagito open ports. {manual}"), FLARE),
+        }
+        ui.horizontal(|ui| {
+            ui.label("Your address");
+            ui.add(egui::TextEdit::singleline(&mut share.addr).hint_text("Public IP or hostname").desired_width(ui.available_width()));
+        });
+        let ready = !share.addr.trim().is_empty() && remote::parse_account_id(&self.s.account_id).is_some();
+        let mut close = false;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(ready, egui::Button::new("Copy invite link")).clicked() {
+                ui.ctx().copy_text(remote::invite(&share.console, &share.addr, &self.s.account_id));
+                self.notice = Some(("Invite copied. Send it to your friend; they paste it into nagito.".into(), true, Instant::now()));
+            }
+            if ui.button("Close").clicked() {
+                close = true;
+            }
+        });
+        if !ready {
+            note(ui, "Needs your public address and your PSN account ID.", FLARE);
+        }
+        note(
+            ui,
+            "The link holds your PS5's Remote Play keys and your PSN account ID, so only send it to someone you trust. They can play whenever the PS5 is on, even when nagito is closed. To cut them off, remove this PC under Settings, System, Remote Play, Linked devices on the PS5, then link again.",
+            HAZE,
+        );
+        if close {
+            self.share = None;
         }
     }
 
