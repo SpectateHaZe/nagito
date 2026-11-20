@@ -15,7 +15,8 @@ struct Params {
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var<uniform> p: Params;
-@group(0) @binding(3) var tex2: texture_2d<f32>; // NV12 chroma
+@group(0) @binding(3) var tex2: texture_2d<f32>; // NV12 chroma, or the second input of a pass
+@group(0) @binding(4) var tex3: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -205,4 +206,130 @@ fn fs_rcas(in: VsOut) -> @location(0) vec4<f32> {
         col = pow(col, vec3(2.2));
     }
     return vec4(col, 1.0);
+}
+
+// ---------- frame generation ----------
+// Luma pyramid level, 8x8 block motion search, vector median, then a motion-compensated midpoint frame.
+
+const LUMA_DIV: f32 = 4.0;
+const SEARCH: i32 = 12; // +-12 quarter-res px = +-48 full-res px per source frame
+
+@fragment
+fn fs_luma(in: VsOut) -> @location(0) vec4<f32> {
+    // Four bilinear taps cover the 4x4 source pixels under this quarter-res pixel.
+    let px = 1.0 / vec2<f32>(textureDimensions(tex));
+    var c = textureSampleLevel(tex, samp, in.uv + vec2(-px.x, -px.y), 0.0).rgb;
+    c += textureSampleLevel(tex, samp, in.uv + vec2(px.x, -px.y), 0.0).rgb;
+    c += textureSampleLevel(tex, samp, in.uv + vec2(-px.x, px.y), 0.0).rgb;
+    c += textureSampleLevel(tex, samp, in.uv + vec2(px.x, px.y), 0.0).rgb;
+    return vec4(dot(c * 0.25, vec3(0.299, 0.587, 0.114)), 0.0, 0.0, 1.0);
+}
+
+fn prev_l(c: vec2<i32>) -> f32 {
+    let m = vec2<i32>(textureDimensions(tex)) - 1;
+    return textureLoad(tex, clamp(c, vec2(0), m), 0).r;
+}
+
+fn cur_l(c: vec2<i32>) -> f32 {
+    let m = vec2<i32>(textureDimensions(tex2)) - 1;
+    return textureLoad(tex2, clamp(c, vec2(0), m), 0).r;
+}
+
+// Sum of absolute differences between the current block and the previous frame shifted by d.
+fn sad(blk: ptr<function, array<f32, 64>>, origin: vec2<i32>, d: vec2<i32>) -> f32 {
+    var s = 0.0;
+    for (var i = 0; i < 64; i++) {
+        s += abs((*blk)[i] - prev_l(origin + d + vec2(i % 8, i / 8)));
+    }
+    return s;
+}
+
+// Sub-pixel offset from a parabola through three costs.
+fn refine(l: f32, c: f32, r: f32) -> f32 {
+    let den = l - 2.0 * c + r;
+    if (den <= 1e-5) {
+        return 0.0;
+    }
+    return clamp(0.5 * (l - r) / den, -0.5, 0.5);
+}
+
+// Output: where each current-frame block came from in the previous frame, in quarter-res pixels.
+@fragment
+fn fs_me(in: VsOut) -> @location(0) vec4<f32> {
+    let origin = vec2<i32>(in.pos.xy) * 8;
+    var blk: array<f32, 64>;
+    for (var i = 0; i < 64; i++) {
+        blk[i] = cur_l(origin + vec2(i % 8, i / 8));
+    }
+    var best = vec2(0, 0);
+    // Small bias toward no motion keeps flat areas and static HUD still.
+    var best_cost = sad(&blk, origin, best) - 0.05;
+    for (var dy = -SEARCH; dy <= SEARCH; dy++) {
+        for (var dx = -SEARCH; dx <= SEARCH; dx++) {
+            let d = vec2(dx, dy);
+            let cost = sad(&blk, origin, d) + 0.004 * f32(abs(dx) + abs(dy));
+            if (cost < best_cost) {
+                best_cost = cost;
+                best = d;
+            }
+        }
+    }
+    let c = sad(&blk, origin, best);
+    let fx = refine(sad(&blk, origin, best - vec2(1, 0)), c, sad(&blk, origin, best + vec2(1, 0)));
+    let fy = refine(sad(&blk, origin, best - vec2(0, 1)), c, sad(&blk, origin, best + vec2(0, 1)));
+    return vec4(vec2<f32>(best) + vec2(fx, fy), 0.0, 1.0);
+}
+
+// Vector median of the 3x3 neighbourhood: drops lone wrong vectors.
+@fragment
+fn fs_mv_filter(in: VsOut) -> @location(0) vec4<f32> {
+    let m = vec2<i32>(textureDimensions(tex)) - 1;
+    let c = vec2<i32>(in.pos.xy);
+    var v: array<vec2<f32>, 9>;
+    for (var i = 0; i < 9; i++) {
+        v[i] = textureLoad(tex, clamp(c + vec2(i % 3 - 1, i / 3 - 1), vec2(0), m), 0).rg;
+    }
+    var best = v[4];
+    var best_d = 1e9;
+    for (var i = 0; i < 9; i++) {
+        var d = 0.0;
+        for (var j = 0; j < 9; j++) {
+            let e = abs(v[i] - v[j]);
+            d += e.x + e.y;
+        }
+        if (d < best_d) {
+            best_d = d;
+            best = v[i];
+        }
+    }
+    return vec4(best, 0.0, 1.0);
+}
+
+// tex = previous frame, tex2 = current frame, tex3 = motion field.
+// Each pixel tries the motion of its 3x3 neighbouring blocks and keeps the one where both frames agree,
+// so object edges follow the object instead of smearing the background.
+@fragment
+fn fs_interp(in: VsOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(tex));
+    let bdims = vec2<i32>(textureDimensions(tex3));
+    let block = vec2<i32>(in.uv * vec2<f32>(bdims));
+    let luma_w = vec3(0.299, 0.587, 0.114);
+    var best = vec3(0.0);
+    var best_err = 1e9;
+    for (var i = 0; i < 9; i++) {
+        let bc = clamp(block + vec2(i % 3 - 1, i / 3 - 1), vec2(0), bdims - 1);
+        let mv = textureLoad(tex3, bc, 0).rg * LUMA_DIV / dims; // in uv units
+        let a = textureSampleLevel(tex, samp, in.uv + mv * 0.5, 0.0).rgb;
+        let b = textureSampleLevel(tex2, samp, in.uv - mv * 0.5, 0.0).rgb;
+        // the pixel's own block wins ties, so flat areas keep their measured motion
+        let err = abs(dot(a - b, luma_w)) + select(0.004, 0.0, i == 4);
+        if (err < best_err) {
+            best_err = err;
+            best = (a + b) * 0.5;
+        }
+    }
+    // No vector fits (something appeared or vanished): fall back to the newer frame.
+    let w = smoothstep(0.06, 0.2, best_err);
+    let cur = textureSampleLevel(tex2, samp, in.uv, 0.0).rgb;
+    return vec4(mix(best, cur, w), 1.0);
 }

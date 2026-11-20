@@ -199,7 +199,6 @@ struct App {
     videos: Vec<capture::VideoDevice>,
     audios: Vec<String>,
     video: Option<capture::VideoDevice>,
-    gpu_vendor: u32,
     live: Option<Live>,
     playing: bool,
     settings_open: bool,
@@ -232,7 +231,6 @@ impl App {
             videos: vec![],
             audios: vec![],
             video: None,
-            gpu_vendor: rs.adapter.get_info().vendor,
             live: None,
             playing: false,
             settings_open: std::env::var_os("NAGITO_SCREENSHOT_SETTINGS").is_some(),
@@ -254,11 +252,21 @@ impl App {
             app.s.keys = KB_DEFAULT.iter().map(|k| k.to_string()).collect();
         }
         app.rescan();
+        if std::env::var_os("NAGITO_TEST_PATTERN").is_some() {
+            // Dev aid: play a synthetic 30 fps source with frame generation, no console or camera needed.
+            let slot = Arc::new(FrameSlot::default());
+            let c = cc.egui_ctx.clone();
+            let session = capture::test_pattern(slot.clone(), move || c.request_repaint());
+            app.live = Some(Live { key: None, session: Session::Capture(session), slot });
+            app.playing = true;
+            app.s.mode = Mode::Smooth;
+            app.s.show_stats = true;
+        }
         app
     }
 
     fn look(&self) -> Look {
-        Look { scaler: self.s.scaler, sharpness: self.s.sharpness }
+        Look { scaler: self.s.scaler, sharpness: self.s.sharpness, frame_gen: self.s.mode == Mode::Smooth }
     }
 
     fn rescan(&mut self) {
@@ -413,14 +421,7 @@ impl App {
     fn mode_note(&self) -> String {
         match self.s.mode {
             Mode::Responsive => "Each frame is shown the moment it arrives. Lowest delay.".into(),
-            Mode::Smooth => {
-                let how = match self.gpu_vendor {
-                    0x10DE => "Turn on Smooth Motion for nagito.exe in the NVIDIA app.",
-                    0x1002 => "Turn on Fluid Motion Frames in AMD Software.",
-                    _ => "Turn on frame generation in your graphics driver.",
-                };
-                format!("Your graphics driver doubles 30 fps to 60, adding about one frame of delay. {how}")
-            }
+            Mode::Smooth => "nagito draws a frame between every two it gets, so a 30 fps stream plays at 60. Adds half a frame of delay (17 ms at 30 fps); fast motion can wobble a little at edges.".into(),
         }
     }
 
@@ -704,7 +705,7 @@ impl App {
                 }
 
                 section(ui, "Picture");
-                widgets::segmented(ui, &mut self.s.mode, &[(Mode::Responsive, "Responsive"), (Mode::Smooth, "Smooth 60")]);
+                widgets::segmented(ui, &mut self.s.mode, &[(Mode::Responsive, "Responsive"), (Mode::Smooth, "Frame gen")]);
                 ui.label(egui::RichText::new(self.mode_note()).size(14.0).color(HAZE));
                 ui.add_space(4.0);
                 section(ui, "Scaling");
@@ -1053,6 +1054,16 @@ impl App {
             p.rect_filled(r, 12.0, PANEL_HI);
             p.text(r.center(), Align2::CENTER_CENTER, "No controller found. Connect a DualSense by USB cable or Bluetooth.", FontId::proportional(15.0), PAPER);
         }
+        if self.look().frame_gen {
+            // Wake up again when the real frame should replace the generated one.
+            let half = Duration::from_secs_f32(0.5 / stats.source_fps.clamp(20.0, 240.0));
+            let real_at = *live.slot.real_at.lock().unwrap();
+            if live.slot.has_pending() {
+                ui.ctx().request_repaint_after(half);
+            } else if let Some(t) = real_at {
+                ui.ctx().request_repaint_after(t.saturating_duration_since(Instant::now()));
+            }
+        }
         if self.s.show_stats {
             hud(ui, avail.left_top() + vec2(16.0, 16.0), &stats);
         }
@@ -1180,6 +1191,7 @@ fn hud(ui: &egui::Ui, at: egui::Pos2, s: &video::Stats) {
     let mut rows: Vec<(&str, String, Color32)> = vec![
         ("Source", format!("{}×{} at {:.0} fps", s.width, s.height, s.source_fps), PAPER),
         ("Frame age", format!("{:.1} ms", s.frame_age_ms), age_color),
+        ("Shown", format!("{:.0} fps", s.shown_fps), PAPER),
         ("Dropped", s.dropped.to_string(), PAPER),
     ];
     if s.decode_ms > 0.0 {
@@ -1312,7 +1324,14 @@ fn dev_screenshot(ctx: &egui::Context, path: &str) {
     })));
 }
 
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(ms: u32) -> u32;
+}
+
 fn main() -> eframe::Result {
+    // 1 ms timer resolution so generated and real frames are presented on time, not on 15.6 ms ticks.
+    unsafe { timeBeginPeriod(1) };
     // There is no console window, so panics go to %APPDATA%\nagito\crash.log.
     std::panic::set_hook(Box::new(|info| {
         let dir = std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap_or_default()).join("nagito");

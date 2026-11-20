@@ -86,6 +86,41 @@ pub fn start(dev: VideoDevice, mode: Option<CamMode>, audio: Option<String>, slo
     Session { stop, modes }
 }
 
+/// Dev aid: a 1280x720 square sliding across a grid at 30 fps.
+pub fn test_pattern(slot: Arc<FrameSlot>, repaint: impl Fn() + Send + 'static) -> Session {
+    let stop = Arc::new(AtomicBool::new(false));
+    let s = stop.clone();
+    std::thread::spawn(move || {
+        let (w, h) = (1280u32, 720u32);
+        let start = Instant::now();
+        for n in 0u32.. {
+            if s.load(Ordering::Relaxed) {
+                break;
+            }
+            let x0 = (n * 24) % (w - 160);
+            let mut data = vec![40u8; (w * h * 4) as usize];
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    let grid = (x / 40 + y / 40) % 2 == 0;
+                    let square = x >= x0 && x < x0 + 160 && (280..440).contains(&y);
+                    let v = if square { [242, 165, 65, 255] } else if grid { [60, 58, 90, 255] } else { [30, 28, 48, 255] };
+                    data[i..i + 4].copy_from_slice(&v);
+                }
+            }
+            slot.push(Frame { width: w, height: h, pixels: Pixels::Rgba, data, captured_at: Instant::now() });
+            {
+                let mut st = slot.stats.lock().unwrap();
+                (st.width, st.height, st.source_fps) = (w, h, 30.0);
+            }
+            repaint();
+            let next = start + Duration::from_secs_f64((n + 1) as f64 / 30.0);
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        }
+    });
+    Session { stop, modes: Arc::new(Mutex::new(vec![])) }
+}
+
 fn video_loop(dev: VideoDevice, mode: Option<CamMode>, modes: &Mutex<Vec<CamMode>>, slot: &FrameSlot, stop: &AtomicBool, repaint: &dyn Fn()) -> anyhow::Result<()> {
     let fmt = RequestedFormat::new::<RgbAFormat>(RequestedFormatType::AbsoluteHighestResolution);
     let mut cam = nokhwa::Camera::new(CameraIndex::Index(dev.index), fmt)?;
