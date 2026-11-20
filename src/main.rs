@@ -892,8 +892,8 @@ impl App {
                     ui,
                     match self.s.present {
                         Present::LowDelay => "Shows the newest frame at each refresh without tearing.",
-                        Present::Tearing => "Shows frames the instant they are ready. Lowest delay; may tear unless you have G-Sync or FreeSync.",
-                        Present::Vsync => "Waits for the display. Steadiest pacing, about one refresh more delay. Smooth 60 always uses this.",
+                        Present::Tearing => "Shows frames the instant they are ready. Best with G-Sync or FreeSync: the screen then refreshes exactly when each frame lands, so 60 fps is perfectly even. Without them it may tear.",
+                        Present::Vsync => "Waits for the display. About one refresh more delay.",
                     },
                 );
                 widgets::toggle(ui, &mut self.s.start_fullscreen, "Play in fullscreen");
@@ -1220,13 +1220,11 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
-        let present_mode = match (self.playing, self.s.mode) {
-            (true, Mode::Smooth) => wgpu::PresentMode::Fifo, // steady pacing for driver frame generation
-            _ => match self.s.present {
-                Present::LowDelay => wgpu::PresentMode::Mailbox,
-                Present::Tearing => wgpu::PresentMode::Immediate,
-                Present::Vsync => wgpu::PresentMode::Fifo,
-            },
+        // Smooth 60 no longer forces VSync: on a high-refresh screen that made 60 fps judder (2-3 refresh cadence).
+        let present_mode = match self.s.present {
+            Present::LowDelay => wgpu::PresentMode::Mailbox,
+            Present::Tearing => wgpu::PresentMode::Immediate, // lets G-Sync/FreeSync refresh exactly on each frame
+            Present::Vsync => wgpu::PresentMode::Fifo,
         };
         frame.set_wgpu_surface_config(egui_wgpu::SurfaceConfig { present_mode, desired_maximum_frame_latency: Some(1) });
         capture::set_volume(self.s.volume);
