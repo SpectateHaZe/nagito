@@ -86,7 +86,7 @@ pub fn start(dev: VideoDevice, mode: Option<CamMode>, audio: Option<String>, slo
     Session { stop, modes }
 }
 
-/// Dev aid: a 1280x720 square sliding across a grid at 30 fps.
+/// Dev aid: a 1280x720 square sliding one way over a grid panning the other, at 30 fps.
 pub fn test_pattern(slot: Arc<FrameSlot>, repaint: impl Fn() + Send + 'static) -> Session {
     let stop = Arc::new(AtomicBool::new(false));
     let s = stop.clone();
@@ -102,7 +102,7 @@ pub fn test_pattern(slot: Arc<FrameSlot>, repaint: impl Fn() + Send + 'static) -
             for y in 0..h {
                 for x in 0..w {
                     let i = ((y * w + x) * 4) as usize;
-                    let grid = (x / 40 + y / 40) % 2 == 0;
+                    let grid = ((x + n * 7) / 40 + y / 40) % 2 == 0; // background pans like a following camera
                     let square = x >= x0 && x < x0 + 160 && (280..440).contains(&y);
                     let v = if square { [242, 165, 65, 255] } else if grid { [60, 58, 90, 255] } else { [30, 28, 48, 255] };
                     data[i..i + 4].copy_from_slice(&v);

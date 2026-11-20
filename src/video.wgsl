@@ -305,31 +305,98 @@ fn fs_mv_filter(in: VsOut) -> @location(0) vec4<f32> {
     return vec4(best, 0.0, 1.0);
 }
 
-// tex = previous frame, tex2 = current frame, tex3 = motion field.
-// Each pixel tries the motion of its 3x3 neighbouring blocks and keeps the one where both frames agree,
-// so object edges follow the object instead of smearing the background.
+@fragment
+fn fs_luma_half(in: VsOut) -> @location(0) vec4<f32> {
+    // A half-size pixel center sits between 4 source pixels, so one bilinear tap averages them.
+    let c = textureSampleLevel(tex, samp, in.uv, 0.0).rgb;
+    return vec4(dot(c, vec3(0.299, 0.587, 0.114)), 0.0, 0.0, 1.0);
+}
+
+// Second stage on the half-size picture: try the coarse vectors around this block (tex3, in quarter-res
+// px), keep the best, then search +-2 px around it with sub-pixel refinement. Output in half-res px.
+@fragment
+fn fs_me_fine(in: VsOut) -> @location(0) vec4<f32> {
+    let bc = vec2<i32>(in.pos.xy);
+    let origin = bc * 8;
+    var blk: array<f32, 64>;
+    for (var i = 0; i < 64; i++) {
+        blk[i] = cur_l(origin + vec2(i % 8, i / 8));
+    }
+    let cm = vec2<i32>(textureDimensions(tex3)) - 1;
+    let coarse = bc / 2;
+    var best = vec2(0, 0);
+    var best_cost = sad(&blk, origin, best) - 0.05;
+    for (var i = 0; i < 9; i++) {
+        let v = textureLoad(tex3, clamp(coarse + vec2(i % 3 - 1, i / 3 - 1), vec2(0), cm), 0).rg * 2.0;
+        let d = vec2<i32>(round(v));
+        let cost = sad(&blk, origin, d);
+        if (cost < best_cost) {
+            best_cost = cost;
+            best = d;
+        }
+    }
+    let seed = best;
+    for (var dy = -2; dy <= 2; dy++) {
+        for (var dx = -2; dx <= 2; dx++) {
+            let d = seed + vec2(dx, dy);
+            let cost = sad(&blk, origin, d);
+            if (cost < best_cost) {
+                best_cost = cost;
+                best = d;
+            }
+        }
+    }
+    let c = sad(&blk, origin, best);
+    let fx = refine(sad(&blk, origin, best - vec2(1, 0)), c, sad(&blk, origin, best + vec2(1, 0)));
+    let fy = refine(sad(&blk, origin, best - vec2(0, 1)), c, sad(&blk, origin, best + vec2(0, 1)));
+    return vec4(vec2<f32>(best) + vec2(fx, fy), 0.0, 1.0);
+}
+
+const FINE_DIV: f32 = 2.0;
+
+// Mean luma mismatch over a small cross-shaped patch: one pixel alone is too easily fooled by noise.
+fn patch_err(uv: vec2<f32>, mv: vec2<f32>, px: vec2<f32>) -> f32 {
+    let w = vec3(0.299, 0.587, 0.114);
+    var e = 0.0;
+    for (var k = 0; k < 5; k++) {
+        var o = vec2(0.0);
+        if (k == 1) { o = vec2(-2.0, 0.0); }
+        if (k == 2) { o = vec2(2.0, 0.0); }
+        if (k == 3) { o = vec2(0.0, -2.0); }
+        if (k == 4) { o = vec2(0.0, 2.0); }
+        let q = uv + o * px;
+        let a = textureSampleLevel(tex, samp, q + mv * 0.5, 0.0).rgb;
+        let b = textureSampleLevel(tex2, samp, q - mv * 0.5, 0.0).rgb;
+        e += abs(dot(a - b, w));
+    }
+    return e * 0.2;
+}
+
+// tex = previous frame, tex2 = current frame, tex3 = fine motion field (half-res px).
+// Each pixel tries no motion and the motion of its 3x3 neighbouring blocks, and keeps the one where both
+// frames agree over a small patch, so edges follow the object and the HUD stays put.
 @fragment
 fn fs_interp(in: VsOut) -> @location(0) vec4<f32> {
     let dims = vec2<f32>(textureDimensions(tex));
+    let px = 1.0 / dims;
     let bdims = vec2<i32>(textureDimensions(tex3));
     let block = vec2<i32>(in.uv * vec2<f32>(bdims));
-    let luma_w = vec3(0.299, 0.587, 0.114);
-    var best = vec3(0.0);
-    var best_err = 1e9;
+    var best_mv = vec2(0.0);
+    var best_err = patch_err(in.uv, best_mv, px) - 0.003;
     for (var i = 0; i < 9; i++) {
         let bc = clamp(block + vec2(i % 3 - 1, i / 3 - 1), vec2(0), bdims - 1);
-        let mv = textureLoad(tex3, bc, 0).rg * LUMA_DIV / dims; // in uv units
-        let a = textureSampleLevel(tex, samp, in.uv + mv * 0.5, 0.0).rgb;
-        let b = textureSampleLevel(tex2, samp, in.uv - mv * 0.5, 0.0).rgb;
-        // the pixel's own block wins ties, so flat areas keep their measured motion
-        let err = abs(dot(a - b, luma_w)) + select(0.004, 0.0, i == 4);
+        let mv = textureLoad(tex3, bc, 0).rg * FINE_DIV * px; // in uv units
+        let err = patch_err(in.uv, mv, px) + select(0.002, 0.0, i == 4);
         if (err < best_err) {
             best_err = err;
-            best = (a + b) * 0.5;
+            best_mv = mv;
         }
     }
-    // No vector fits (something appeared or vanished): fall back to the newer frame.
-    let w = smoothstep(0.06, 0.2, best_err);
-    let cur = textureSampleLevel(tex2, samp, in.uv, 0.0).rgb;
-    return vec4(mix(best, cur, w), 1.0);
+    let a = textureSampleLevel(tex, samp, in.uv + best_mv * 0.5, 0.0).rgb;
+    let b = textureSampleLevel(tex2, samp, in.uv - best_mv * 0.5, 0.0).rgb;
+    // Nothing fits (something appeared or vanished): show the newer frame alone instead of a double image.
+    if (best_err > 0.05) {
+        return vec4(textureSampleLevel(tex2, samp, in.uv, 0.0).rgb, 1.0);
+    }
+    return vec4((a + b) * 0.5, 1.0);
 }

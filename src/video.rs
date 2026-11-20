@@ -85,12 +85,17 @@ struct Chain {
     size: [u32; 2],
     frames: [wgpu::Texture; 2],
     luma: [wgpu::Texture; 2],
+    luma_half: [wgpu::Texture; 2],
     mv: wgpu::Texture,
     mv_smooth: wgpu::Texture,
+    mv_fine: wgpu::Texture,
+    mv_fine_smooth: wgpu::Texture,
     interp: wgpu::Texture,
     luma_bg: [wgpu::BindGroup; 2],
     me_bg: [wgpu::BindGroup; 2],
     filter_bg: wgpu::BindGroup,
+    me_fine_bg: [wgpu::BindGroup; 2],
+    filter_fine_bg: wgpu::BindGroup,
     interp_bg: [wgpu::BindGroup; 2],
     /// Upscale input: frames[0], frames[1] or interp.
     upscale_bg: [wgpu::BindGroup; 3],
@@ -105,6 +110,8 @@ struct Gpu {
     rcas_pipe: wgpu::RenderPipeline,
     nv12_pipe: wgpu::RenderPipeline,
     luma_pipe: wgpu::RenderPipeline,
+    luma_half_pipe: wgpu::RenderPipeline,
+    me_fine_pipe: wgpu::RenderPipeline,
     me_pipe: wgpu::RenderPipeline,
     filter_pipe: wgpu::RenderPipeline,
     interp_pipe: wgpu::RenderPipeline,
@@ -189,6 +196,8 @@ pub fn install(rs: &egui_wgpu::RenderState) {
         rcas_pipe: pipe("fs_rcas", rs.target_format),
         nv12_pipe: pipe("fs_nv12", MID_FORMAT),
         luma_pipe: pipe("fs_luma", LUMA_FORMAT),
+        luma_half_pipe: pipe("fs_luma_half", LUMA_FORMAT),
+        me_fine_pipe: pipe("fs_me_fine", MV_FORMAT),
         me_pipe: pipe("fs_me", MV_FORMAT),
         filter_pipe: pipe("fs_mv_filter", MV_FORMAT),
         interp_pipe: pipe("fs_interp", MID_FORMAT),
@@ -262,18 +271,29 @@ fn make_chain(dev: &wgpu::Device, g: &Gpu, size: [u32; 2]) -> Chain {
     let bsize = [lsize[0].div_ceil(BLOCK), lsize[1].div_ceil(BLOCK)];
     let mv = texture(dev, bsize, MV_FORMAT, rt);
     let mv_smooth = texture(dev, bsize, MV_FORMAT, rt);
+    // Second stage: half-size picture, 8x8 blocks = 16x16 real pixels, seeded by the coarse vectors.
+    let hsize = [(size[0] / 2).max(1), (size[1] / 2).max(1)];
+    let luma_half = [0, 1].map(|_| texture(dev, hsize, LUMA_FORMAT, rt));
+    let fsize = [hsize[0].div_ceil(BLOCK), hsize[1].div_ceil(BLOCK)];
+    let mv_fine = texture(dev, fsize, MV_FORMAT, rt);
+    let mv_fine_smooth = texture(dev, fsize, MV_FORMAT, rt);
     let interp = texture(dev, size, MID_FORMAT, rt);
     Chain {
         luma_bg: [0, 1].map(|i| bind_group(dev, g, &[&frames[i]])),
         me_bg: [0, 1].map(|cur| bind_group(dev, g, &[&luma[1 - cur], &luma[cur]])),
         filter_bg: bind_group(dev, g, &[&mv]),
-        interp_bg: [0, 1].map(|cur| bind_group(dev, g, &[&frames[1 - cur], &frames[cur], &mv_smooth])),
+        me_fine_bg: [0, 1].map(|cur| bind_group(dev, g, &[&luma_half[1 - cur], &luma_half[cur], &mv_smooth])),
+        filter_fine_bg: bind_group(dev, g, &[&mv_fine]),
+        interp_bg: [0, 1].map(|cur| bind_group(dev, g, &[&frames[1 - cur], &frames[cur], &mv_fine_smooth])),
         upscale_bg: [bind_group(dev, g, &[&frames[0]]), bind_group(dev, g, &[&frames[1]]), bind_group(dev, g, &[&interp])],
         size,
         frames,
         luma,
+        luma_half,
         mv,
         mv_smooth,
+        mv_fine,
+        mv_fine_smooth,
         interp,
     }
 }
@@ -360,9 +380,12 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
             let c = g.chain.as_ref().unwrap();
             if self.look.frame_gen {
                 pass(enc, &c.luma[cur], &g.luma_pipe, &c.luma_bg[cur]);
+                pass(enc, &c.luma_half[cur], &g.luma_half_pipe, &c.luma_bg[cur]);
                 if g.has_prev {
                     pass(enc, &c.mv, &g.me_pipe, &c.me_bg[cur]);
                     pass(enc, &c.mv_smooth, &g.filter_pipe, &c.filter_bg);
+                    pass(enc, &c.mv_fine, &g.me_fine_pipe, &c.me_fine_bg[cur]);
+                    pass(enc, &c.mv_fine_smooth, &g.filter_pipe, &c.filter_fine_bg);
                     pass(enc, &c.interp, &g.interp_pipe, &c.interp_bg[cur]);
                     g.show = 2;
                     *self.slot.real_at.lock().unwrap() = Some(now + half);
