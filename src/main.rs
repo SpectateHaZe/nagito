@@ -142,7 +142,7 @@ impl Default for Settings {
     }
 }
 
-const KEYS_VERSION: u32 = 2;
+const KEYS_VERSION: u32 = 3;
 
 type LiveKey = (capture::VideoDevice, Option<capture::CamMode>, Option<String>);
 

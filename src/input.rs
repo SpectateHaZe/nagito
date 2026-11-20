@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 /// Actions: the 16 PS5 buttons (remote::BUTTONS order), then these.
 const EXTRA: [&str; 6] = ["L2", "R2", "Move forward", "Move back", "Move left", "Move right"];
 
-/// Defaults modelled on GTA's PC keyboard layout, translated to the PS5 buttons it maps to.
+/// Defaults copied from GTA V's PC on-foot keys: each PS5 button gets the key PC GTA V uses for the same action.
 pub const DEFAULT: [&str; 22] = [
-    "Shift", "R", "Space", "F", // Cross (sprint), Circle (reload), Square (jump), Triangle (enter vehicle)
-    "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", // D-pad
-    "Tab", "Q", "Ctrl", "Mouse Middle", // L1 (weapon wheel), R1 (cover), L3 (crouch), R3 (look back)
-    "Enter", "Backspace", "V", "Home", // Options, Create, Touchpad (camera), PS
-    "Mouse Right", "Mouse Left", // L2 aim, R2 fire
+    "Shift", "R", "Space", "F", // Cross sprint, Circle reload/melee, Square jump, Triangle enter vehicle
+    "G", "E", "ArrowUp", "Alt", // D-pad left detonate, right context action, up phone, down character wheel (hold)
+    "Tab", "Q", "Ctrl", "C", // L1 weapon wheel, R1 cover, L3 stealth, R3 look behind
+    "P", "Backspace", "V", "Home", // Options pause (Esc leaves nagito), Create, Touchpad camera view, PS
+    "Mouse Right", "Mouse Left", // L2 aim, R2 shoot
     "W", "S", "A", "D",
 ];
 
