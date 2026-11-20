@@ -93,17 +93,75 @@ impl Kbm {
     fn bound_down(&self, name: &str, i: &InputState, now: Instant) -> bool {
         match name {
             "" => false,
-            "Shift" => i.modifiers.shift,
-            "Ctrl" => i.modifiers.ctrl,
-            "Alt" => i.modifiers.alt,
+            "Shift" => key_down(VK_SHIFT),
+            "Ctrl" => key_down(VK_CONTROL),
+            "Alt" => key_down(VK_MENU),
             "Wheel Up" => self.wheel_up_until.is_some_and(|t| now < t),
             "Wheel Down" => self.wheel_down_until.is_some_and(|t| now < t),
             _ => match MOUSE_BUTTONS.iter().find(|(_, n)| *n == name) {
                 Some((b, _)) => i.pointer.button_down(*b),
-                None => egui::Key::from_name(name).is_some_and(|k| i.key_down(k)),
+                None => egui::Key::from_name(name).is_some_and(|k| vk(k).map_or_else(|| i.key_down(k), key_down)),
             },
         }
     }
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetAsyncKeyState(vk: i32) -> i16;
+}
+
+const VK_SHIFT: i32 = 0x10;
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU: i32 = 0x12;
+
+/// The key's real state from Windows. egui's key events can't be trusted for a game: holding Ctrl turns
+/// C, V and X into copy/paste and drops them, and keys tracked by character can stick when Shift changes.
+fn key_down(vk: i32) -> bool {
+    unsafe { GetAsyncKeyState(vk) < 0 }
+}
+
+/// Windows virtual-key code for an egui key, or None to fall back to egui's own state.
+fn vk(k: egui::Key) -> Option<i32> {
+    use egui::Key::*;
+    let name = k.name();
+    match name.as_bytes() {
+        [c] if c.is_ascii_uppercase() || c.is_ascii_digit() => return Some(*c as i32),
+        [b'F', rest @ ..] if !rest.is_empty() => {
+            return std::str::from_utf8(rest).ok()?.parse::<i32>().ok().filter(|n| (1..=24).contains(n)).map(|n| 0x6F + n);
+        }
+        _ => {}
+    }
+    Some(match k {
+        Backspace => 0x08,
+        Tab => 0x09,
+        Enter => 0x0D,
+        Escape => 0x1B,
+        Space => 0x20,
+        PageUp => 0x21,
+        PageDown => 0x22,
+        End => 0x23,
+        Home => 0x24,
+        ArrowLeft => 0x25,
+        ArrowUp => 0x26,
+        ArrowRight => 0x27,
+        ArrowDown => 0x28,
+        Insert => 0x2D,
+        Delete => 0x2E,
+        Exclamationmark => b'1' as i32,
+        Semicolon | Colon => 0xBA,
+        Equals | Plus => 0xBB,
+        Comma => 0xBC,
+        Minus => 0xBD,
+        Period => 0xBE,
+        Slash | Questionmark => 0xBF,
+        Backtick => 0xC0,
+        OpenBracket | OpenCurlyBracket => 0xDB,
+        Backslash | Pipe => 0xDC,
+        CloseBracket | CloseCurlyBracket => 0xDD,
+        Quote => 0xDE,
+        _ => return None,
+    })
 }
 
 /// Mouse speed (counts per second) to right-stick deflection. Keeps the direction, scales the length,
@@ -141,6 +199,17 @@ pub fn capture(i: &InputState, armed: bool) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_default_key_is_read_from_windows() {
+        for name in DEFAULT.iter().filter(|n| !n.starts_with("Mouse") && !["Shift", "Ctrl", "Alt"].contains(n)) {
+            let key = egui::Key::from_name(name).unwrap_or_else(|| panic!("{name} is not a key"));
+            assert!(vk(key).is_some(), "{name} has no virtual-key code");
+        }
+        assert_eq!(vk(egui::Key::W), Some(0x57));
+        assert_eq!(vk(egui::Key::F5), Some(0x74));
+        assert_eq!(vk(egui::Key::ArrowUp), Some(0x26));
+    }
 
     const AIM: Aim = Aim { sensitivity: 1.0, dead_zone: 0.2, invert_y: false };
 
