@@ -709,7 +709,12 @@ impl App {
                 ui.label(egui::RichText::new(self.mode_note()).size(14.0).color(HAZE));
                 ui.add_space(4.0);
                 section(ui, "Scaling");
-                widgets::segmented(ui, &mut self.s.scaler, &[(Scaler::Fsr, "FSR 1"), (Scaler::Bicubic, "Bicubic"), (Scaler::Bilinear, "Basic")]);
+                widgets::segmented(ui, &mut self.s.scaler, &[(Scaler::RtxVideo, "RTX VSR"), (Scaler::Fsr, "FSR 1"), (Scaler::Bicubic, "Bicubic"), (Scaler::Bilinear, "Basic")]);
+                if self.s.scaler == Scaler::RtxVideo {
+                    let why = self.stats().and_then(|s| s.vsr).and_then(|r| r.err());
+                    let text = why.map_or("NVIDIA's AI upscaler, for Remote Play on RTX cards. Also cleans up compression blockiness. Falls back to FSR 1 when unavailable.".to_owned(), |e| format!("Using FSR 1 instead: {e}."));
+                    ui.label(egui::RichText::new(text).size(14.0).color(HAZE));
+                }
                 ui.horizontal(|ui| {
                     ui.label("Sharpen");
                     ui.spacing_mut().slider_width = ui.available_width() - 56.0;
@@ -1038,11 +1043,12 @@ impl App {
         let ppp = ui.ctx().pixels_per_point();
         let p = ui.painter();
         p.rect_filled(avail, 0.0, Color32::BLACK);
+        let size_px = [(size.x * ppp).round() as u32, (size.y * ppp).round() as u32];
+        if let Session::Remote(stream) = &live.session {
+            stream.set_vsr(self.s.scaler == Scaler::RtxVideo, size_px);
+        }
         if stats.width > 0 {
-            p.add(egui_wgpu::Callback::new_paint_callback(
-                rect,
-                video::VideoPaint { slot: live.slot.clone(), size_px: [(size.x * ppp).round() as u32, (size.y * ppp).round() as u32], look: self.look() },
-            ));
+            p.add(egui_wgpu::Callback::new_paint_callback(rect, video::VideoPaint { slot: live.slot.clone(), size_px, look: self.look() }));
         } else if stats.error.is_none() {
             p.text(avail.center(), Align2::CENTER_CENTER, "Connecting…", display(36.0), PAPER);
         }
@@ -1192,6 +1198,7 @@ fn hud(ui: &egui::Ui, at: egui::Pos2, s: &video::Stats) {
         ("Source", format!("{}×{} at {:.0} fps", s.width, s.height, s.source_fps), PAPER),
         ("Frame age", format!("{:.1} ms", s.frame_age_ms), age_color),
         ("Shown", format!("{:.0} fps", s.shown_fps), PAPER),
+        ("Upscaler", match &s.vsr { Some(Ok(())) => "RTX Video".into(), Some(Err(_)) => "FSR 1 (no RTX Video)".into(), None => "nagito".into() }, PAPER),
         ("Dropped", s.dropped.to_string(), PAPER),
     ];
     if s.decode_ms > 0.0 {

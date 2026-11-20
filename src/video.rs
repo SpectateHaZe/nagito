@@ -48,6 +48,8 @@ pub struct Stats {
     pub mic: Option<bool>,
     /// Some(previous_was_wrong) while the PS5 waits for its login passcode.
     pub pin: Option<bool>,
+    /// RTX Video Super Resolution: Ok once it upscales, Err(reason) when it is unavailable.
+    pub vsr: Option<Result<(), String>>,
 }
 
 impl FrameSlot {
@@ -70,6 +72,8 @@ pub enum Scaler {
     Bicubic,
     /// AMD FSR 1 EASU: edge-aware, keeps lines crisper than bicubic when scaling up.
     Fsr,
+    /// NVIDIA RTX Video Super Resolution, done before frames reach the renderer; FSR 1 otherwise.
+    RtxVideo,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -339,7 +343,9 @@ impl egui_wgpu::CallbackTrait for VideoPaint {
         let mut params = [0u8; 32];
         params[0..4].copy_from_slice(&(src_size[0] as f32).to_le_bytes());
         params[4..8].copy_from_slice(&(src_size[1] as f32).to_le_bytes());
-        params[8..12].copy_from_slice(&(self.look.scaler as u32).to_le_bytes());
+        // RTX Video frames arrive already at screen size; anything else that reaches here falls back to FSR 1.
+        let scaler = if self.look.scaler == Scaler::RtxVideo { Scaler::Fsr } else { self.look.scaler };
+        params[8..12].copy_from_slice(&(scaler as u32).to_le_bytes());
         params[12..16].copy_from_slice(&(g.target_format.is_srgb() as u32).to_le_bytes());
         params[16..20].copy_from_slice(&self.look.sharpness.to_le_bytes());
         params[20..24].copy_from_slice(&yuv.unwrap_or(0).to_le_bytes());

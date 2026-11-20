@@ -1,6 +1,7 @@
 // nagito Remote Play shim: chiaki-ng session + ffmpeg decode + Opus audio + SDL2 DualSense input.
 #define SDL_MAIN_HANDLED
 #include "nagito_rp.h"
+#include "vsr.h"
 
 #include <chiaki/audio.h>
 #include <chiaki/common.h>
@@ -300,6 +301,12 @@ typedef struct {
 	int16_t mic_buf[MIC_SAMPLES * 2];
 	int mic_fill;
 
+	volatile int vsr_on, vsr_w, vsr_h;
+	int vsr_failed; // stop retrying after the driver said no, until the setting changes
+	Vsr *vsr;
+	uint8_t *rgba;
+	size_t rgba_size;
+
 	ChiakiMutex stats_mutex;
 	uint64_t bytes;
 	uint64_t stats_at_ms;
@@ -352,6 +359,30 @@ static void frame_cb(ChiakiFfmpegDecoder *decoder, void *user)
 	}
 	int flags = (src->color_range == AVCOL_RANGE_JPEG ? NAGITO_FRAME_FULL_RANGE : 0)
 		| (src->colorspace == AVCOL_SPC_BT470BG || src->colorspace == AVCOL_SPC_SMPTE170M ? NAGITO_FRAME_BT601 : 0);
+	int ow = s->vsr_w & ~1, oh = s->vsr_h & ~1;
+	if(s->vsr_on && !s->vsr_failed && ow > w && oh > h)
+	{
+		if(!vsr_size_matches(s->vsr, w, h, ow, oh))
+		{
+			vsr_free(s->vsr);
+			char err[256];
+			s->vsr = vsr_create(w, h, ow, oh, err, sizeof(err));
+			s->vsr_failed = !s->vsr;
+			s->cb.event(s->cb.user, NAGITO_EV_VSR, s->vsr != NULL, s->vsr ? "" : err);
+		}
+		size_t need = (size_t)ow * oh * 4;
+		if(s->vsr && need > s->rgba_size)
+		{
+			free(s->rgba);
+			s->rgba = malloc(need);
+			s->rgba_size = s->rgba ? need : 0;
+		}
+		if(s->vsr && s->rgba && vsr_process(s->vsr, s->nv12, flags & NAGITO_FRAME_FULL_RANGE, flags & NAGITO_FRAME_BT601, s->rgba) == 0)
+		{
+			s->cb.video(s->cb.user, s->rgba, ow, oh, NAGITO_FRAME_RGBA);
+			goto done;
+		}
+	}
 	s->cb.video(s->cb.user, s->nv12, w, h, flags);
 done:
 	av_frame_free(&sw);
@@ -884,6 +915,46 @@ NAGITO_API void nagito_stream_stats(void *stream, NagitoStats *out)
 	chiaki_mutex_unlock(&s->stats_mutex);
 }
 
+NAGITO_API void nagito_stream_set_vsr(void *stream, int on, int out_w, int out_h)
+{
+	Stream *s = stream;
+	if(!s)
+		return;
+	if(on != s->vsr_on)
+		s->vsr_failed = 0;
+	s->vsr_w = out_w;
+	s->vsr_h = out_h;
+	s->vsr_on = on;
+}
+
+NAGITO_API int nagito_vsr_selftest(uint8_t top[4], uint8_t bottom[4], char *err, size_t err_size)
+{
+	const int iw = 1920, ih = 1080, ow = 2560, oh = 1440;
+	Vsr *v = vsr_create(iw, ih, ow, oh, err, err_size);
+	if(!v)
+		return -1;
+	uint8_t *nv12 = malloc((size_t)iw * ih * 3 / 2), *rgba = malloc((size_t)ow * oh * 4);
+	int r = -1;
+	if(nv12 && rgba)
+	{
+		memset(nv12, 235, (size_t)iw * ih / 2);                     // limited-range white
+		memset(nv12 + (size_t)iw * ih / 2, 16, (size_t)iw * ih / 2); // limited-range black
+		memset(nv12 + (size_t)iw * ih, 128, (size_t)iw * ih / 2);    // no color
+		r = vsr_process(v, nv12, 0, 0, rgba);
+		if(r == 0)
+		{
+			memcpy(top, rgba + ((size_t)oh / 4 * ow + ow / 2) * 4, 4);
+			memcpy(bottom, rgba + ((size_t)oh * 3 / 4 * ow + ow / 2) * 4, 4);
+		}
+		else
+			copy_str(err, err_size, "The video processor failed to upscale");
+	}
+	free(nv12);
+	free(rgba);
+	vsr_free(v);
+	return r;
+}
+
 NAGITO_API void nagito_stream_stop(void *stream)
 {
 	Stream *s = stream;
@@ -901,6 +972,8 @@ NAGITO_API void nagito_stream_stop(void *stream)
 	chiaki_mutex_fini(&s->fx_mutex);
 	sws_freeContext(s->sws);
 	free(s->haptics_buf);
+	vsr_free(s->vsr);
+	free(s->rgba);
 	free(s->nv12);
 	free(s);
 }

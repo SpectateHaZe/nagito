@@ -19,7 +19,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("MSYS2 bash not found at {} ({e}). Set NAGITO_MSYS to your msys64 folder.", bash.display()));
     assert!(status.success(), "native Remote Play build failed");
     println!("cargo:rustc-link-search=native={}", root.join("native/build").display());
-    for f in ["native/nagito_rp.c", "native/nagito_rp.h", "native/CMakeLists.txt", "native/build.sh"] {
+    for f in ["native/nagito_rp.c", "native/nagito_rp.h", "native/vsr.c", "native/vsr.h", "native/CMakeLists.txt", "native/build.sh"] {
         println!("cargo:rerun-if-changed={f}");
     }
 }

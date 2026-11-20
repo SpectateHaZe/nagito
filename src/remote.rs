@@ -94,6 +94,9 @@ unsafe extern "C" {
     fn nagito_stream_set_pin(s: *mut c_void, pin: *const c_char);
     fn nagito_stream_set_input(s: *mut c_void, input: *const Input);
     fn nagito_stream_stats(s: *mut c_void, out: *mut RawStats);
+    fn nagito_stream_set_vsr(s: *mut c_void, on: i32, out_w: i32, out_h: i32);
+    #[cfg(test)]
+    fn nagito_vsr_selftest(top: *mut u8, bottom: *mut u8, err: *mut c_char, err_size: usize) -> i32;
 }
 
 /// PS5 buttons in the shim's order; bit i of a button mask is entry i.
@@ -318,6 +321,7 @@ pub struct Stream {
     state: Arc<StreamState>,
     audio_stop: Arc<AtomicBool>,
     last_input: Mutex<Input>,
+    last_vsr: Mutex<(bool, u32, u32)>,
     stats_at: Mutex<Instant>,
 }
 
@@ -328,14 +332,18 @@ const AUDIO_CH: usize = 2;
 extern "C" fn on_video(user: *mut c_void, nv12: *const u8, w: i32, h: i32, flags: i32) {
     let s = unsafe { &*(user as *const StreamState) };
     let (w, h) = (w as u32, h as u32);
-    let data = unsafe { std::slice::from_raw_parts(nv12, (w * h * 3 / 2) as usize) }.to_vec();
-    let pixels = Pixels::Nv12 { full_range: flags & 1 != 0, bt601: flags & 2 != 0 };
+    let rgba = flags & 4 != 0; // already upscaled by RTX Video
+    let len = if rgba { w * h * 4 } else { w * h * 3 / 2 };
+    let data = unsafe { std::slice::from_raw_parts(nv12, len as usize) }.to_vec();
+    let pixels = if rgba { Pixels::Rgba } else { Pixels::Nv12 { full_range: flags & 1 != 0, bt601: flags & 2 != 0 } };
     s.slot.push(Frame { width: w, height: h, pixels, data, captured_at: Instant::now() });
     {
         let mut win = s.fps_window.lock().unwrap();
         win.0 += 1;
         let mut st = s.slot.stats.lock().unwrap();
-        (st.width, st.height) = (w, h);
+        if !rgba {
+            (st.width, st.height) = (w, h); // the stream's own size, not the upscaled one
+        }
         if win.1.elapsed() >= Duration::from_secs(1) {
             st.source_fps = win.0 as f32 / win.1.elapsed().as_secs_f32();
             *win = (0, Instant::now());
@@ -360,6 +368,7 @@ extern "C" fn on_event(user: *mut c_void, kind: i32, value: i32, msg: *const c_c
         3 => st.pin = Some(value != 0),
         4 if !msg.is_empty() => st.audio = Some(format!("Microphone unavailable: {msg}")),
         4 => st.mic = Some(value != 0),
+        5 => st.vsr = Some(if value != 0 { Ok(()) } else { Err(msg) }),
         _ => {}
     }
     drop(st);
@@ -411,7 +420,7 @@ impl Stream {
             }
             Err(e) => slot.stats.lock().unwrap().audio = Some(format!("No sound: {e}")),
         });
-        Ok(Self { raw, state, audio_stop, last_input: Mutex::new(Input::default()), stats_at: Mutex::new(Instant::now()) })
+        Ok(Self { raw, state, audio_stop, last_input: Mutex::new(Input::default()), last_vsr: Mutex::new((false, 0, 0)), stats_at: Mutex::new(Instant::now()) })
     }
 
     /// Answers the PS5's login passcode prompt.
@@ -427,6 +436,18 @@ impl Stream {
         if *last != input {
             *last = input;
             unsafe { nagito_stream_set_input(self.raw, &input) };
+        }
+    }
+
+    /// Turns RTX Video Super Resolution on or off, upscaling to `size` (the picture's size on screen).
+    pub fn set_vsr(&self, on: bool, size: [u32; 2]) {
+        let mut last = self.last_vsr.lock().unwrap();
+        if *last != (on, size[0], size[1]) {
+            *last = (on, size[0], size[1]);
+            unsafe { nagito_stream_set_vsr(self.raw, on as i32, size[0] as i32, size[1] as i32) };
+            if !on {
+                self.state.slot.stats.lock().unwrap().vsr = None;
+            }
         }
     }
 
@@ -458,6 +479,18 @@ mod tests {
         assert_eq!(super::parse_account_id("AQIDBAUGBwg="), Some([1, 2, 3, 4, 5, 6, 7, 8]));
         assert_eq!(super::parse_account_id("AQID"), None);
         assert_eq!(super::parse_account_id("not base64!"), None);
+    }
+
+    /// Runs on NVIDIA cards only; elsewhere it reports why and passes.
+    #[test]
+    fn rtx_video_upscales_with_correct_colors() {
+        let (mut top, mut bottom, mut err) = ([0u8; 4], [0u8; 4], [0 as std::ffi::c_char; 256]);
+        if unsafe { super::nagito_vsr_selftest(top.as_mut_ptr(), bottom.as_mut_ptr(), err.as_mut_ptr(), err.len()) } != 0 {
+            eprintln!("RTX Video unavailable: {}", super::text(&err));
+            return;
+        }
+        assert!(top[..3].iter().all(|&c| c > 240), "white came out as {top:?}");
+        assert!(bottom[..3].iter().all(|&c| c < 15), "black came out as {bottom:?}");
     }
 
     #[test]

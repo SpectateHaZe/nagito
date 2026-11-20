@@ -45,10 +45,12 @@ enum { NAGITO_PAD_A, NAGITO_PAD_B, NAGITO_PAD_X, NAGITO_PAD_Y, NAGITO_PAD_LEFT, 
 	NAGITO_PAD_L1, NAGITO_PAD_R1, NAGITO_PAD_L3, NAGITO_PAD_R3, NAGITO_PAD_START, NAGITO_PAD_BACK, NAGITO_PAD_TOUCHPAD, NAGITO_PAD_GUIDE };
 
 // PIN: value 1 when the previous passcode was wrong. MIC: value 1 when muted.
-enum { NAGITO_EV_CONNECTED = 0, NAGITO_EV_QUIT = 1, NAGITO_EV_PADS = 2, NAGITO_EV_PIN = 3, NAGITO_EV_MIC = 4 };
+enum { NAGITO_EV_CONNECTED = 0, NAGITO_EV_QUIT = 1, NAGITO_EV_PADS = 2, NAGITO_EV_PIN = 3, NAGITO_EV_MIC = 4, NAGITO_EV_VSR = 5 };
+// VSR: value 1 when RTX Video is upscaling, 0 with the reason in text when it is not available.
 
 // Frame flags for the video callback.
-enum { NAGITO_FRAME_FULL_RANGE = 1, NAGITO_FRAME_BT601 = 2 };
+// RGBA: the frame is width*height*4 RGBA, already upscaled by RTX Video.
+enum { NAGITO_FRAME_FULL_RANGE = 1, NAGITO_FRAME_BT601 = 2, NAGITO_FRAME_RGBA = 4 };
 
 // Keyboard/mouse input, merged with the controllers.
 typedef struct NagitoInput {
@@ -91,3 +93,8 @@ NAGITO_API void nagito_stream_stop(void *stream);
 NAGITO_API void nagito_stream_set_pin(void *stream, const char *pin);
 NAGITO_API void nagito_stream_set_input(void *stream, const NagitoInput *input);
 NAGITO_API void nagito_stream_stats(void *stream, NagitoStats *out);
+// Upscale with NVIDIA RTX Video Super Resolution to out_w x out_h (the size on screen); on = 0 turns it off.
+NAGITO_API void nagito_stream_set_vsr(void *stream, int on, int out_w, int out_h);
+// Self-test: upscales a 1080p frame (white top half, black bottom) to 1440p. Returns 0 and the RGBA of a
+// top and a bottom pixel, or -1 with the reason in err.
+NAGITO_API int nagito_vsr_selftest(uint8_t top[4], uint8_t bottom[4], char *err, size_t err_size);

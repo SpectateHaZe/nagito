@@ -15,6 +15,6 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
 
-add_library(nagito_rp SHARED nagito_rp.c)
+add_library(nagito_rp SHARED nagito_rp.c vsr.c)
 target_compile_definitions(nagito_rp PRIVATE NAGITO_BUILD)
-target_link_libraries(nagito_rp PRIVATE chiaki-lib PkgConfig::SDL2 PkgConfig::FFMPEG iphlpapi ws2_32)
+target_link_libraries(nagito_rp PRIVATE chiaki-lib PkgConfig::SDL2 PkgConfig::FFMPEG iphlpapi ws2_32 d3d11 dxgi dxguid)
