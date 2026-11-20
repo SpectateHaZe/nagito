@@ -943,7 +943,7 @@ impl App {
 
                 group(ui, "Keyboard and mouse");
                 widgets::toggle(ui, &mut self.s.kbm, "Play with keyboard and mouse");
-                note(ui, "For Remote Play. The mouse aims with the right stick, WASD moves, and every key, mouse button and wheel direction can be rebound. Esc leaves the game and frees the cursor.");
+                note(ui, "For Remote Play. The mouse aims with the right stick using raw input (Windows pointer speed and acceleration are ignored), WASD moves, and every key, mouse button and wheel direction can be rebound. Esc leaves the game and frees the cursor.");
                 let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, text: String| {
                     ui.horizontal(|ui| {
                         ui.label(label);
@@ -953,7 +953,7 @@ impl App {
                     });
                 };
                 let sens = format!("{:.1}×", self.s.mouse_sens);
-                slider(ui, "Mouse speed", &mut self.s.mouse_sens, 0.2..=4.0, sens);
+                slider(ui, "Mouse speed", &mut self.s.mouse_sens, 0.2..=10.0, sens);
                 let dz = format!("{:.0}%", self.s.aim_dead_zone * 100.0);
                 slider(ui, "Aim dead zone", &mut self.s.aim_dead_zone, 0.0..=0.4, dz);
                 note(ui, "Raise the dead zone if small mouse moves do nothing in game; lower it if aim feels jumpy.");

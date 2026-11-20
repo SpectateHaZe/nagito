@@ -38,6 +38,8 @@ const MOUSE_BUTTONS: [(PointerButton, &str); 5] = [
 const WHEEL_PRESS: Duration = Duration::from_millis(60);
 /// Mouse speed is averaged over this window: long enough to bridge a 125 Hz mouse, short enough to stop fast.
 const AIM_WINDOW: Duration = Duration::from_millis(16);
+/// Raw mouse counts per second (sensitivity 1) that push the right stick all the way.
+const FULL_TILT: f32 = 1000.0;
 
 #[derive(Default)]
 pub struct Kbm {
@@ -111,7 +113,7 @@ pub fn stick(velocity: Vec2, aim: &Aim) -> (i16, i16) {
     if speed < 1.0 {
         return (0, 0);
     }
-    let m = (speed * aim.sensitivity / 2500.0).min(1.0);
+    let m = (speed * aim.sensitivity / FULL_TILT).min(1.0);
     let out = aim.dead_zone + (1.0 - aim.dead_zone) * m;
     let dir = velocity / speed;
     let y = if aim.invert_y { -dir.y } else { dir.y };
