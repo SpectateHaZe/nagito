@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.16)
+project(nagito_rp C)
+
+foreach(opt CHIAKI_ENABLE_TESTS CHIAKI_ENABLE_CLI CHIAKI_ENABLE_GUI CHIAKI_ENABLE_STEAM_SHORTCUT)
+	set(${opt} OFF CACHE BOOL "" FORCE)
+endforeach()
+foreach(opt CHIAKI_ENABLE_STEAMDECK_NATIVE CHIAKI_ENABLE_SETSU CHIAKI_ENABLE_SPEEX CHIAKI_ENABLE_RUDP CHIAKI_ENABLE_PI_DECODER)
+	set(${opt} OFF CACHE STRING "" FORCE)
+endforeach()
+set(CHIAKI_ENABLE_FFMPEG_DECODER ON CACHE STRING "" FORCE)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/chiaki-ng chiaki EXCLUDE_FROM_ALL)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+
+add_library(nagito_rp SHARED nagito_rp.c)
+target_compile_definitions(nagito_rp PRIVATE NAGITO_BUILD)
+target_link_libraries(nagito_rp PRIVATE chiaki-lib PkgConfig::SDL2 PkgConfig::FFMPEG iphlpapi ws2_32)
