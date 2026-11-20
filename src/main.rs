@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod capture;
+mod input;
 mod psn;
 mod remote;
 mod theme;
@@ -68,7 +69,11 @@ struct Settings {
     button_map: [u8; 16],
     kbm: bool,
     mouse_sens: f32,
+    aim_dead_zone: f32,
+    invert_y: bool,
     keys: Vec<String>,
+    /// Bumped when the default key layout changes, so old saved layouts get the new defaults once.
+    keys_version: u32,
     account_id: String,
     consoles: Vec<remote::Linked>,
     console: Option<String>,
@@ -96,20 +101,8 @@ impl Settings {
         }
     }
 
-    fn key(&self, action: usize) -> Option<egui::Key> {
-        self.keys.get(action).and_then(|k| egui::Key::from_name(k))
-    }
 }
 
-/// Keyboard actions: the 16 PS5 buttons (remote::BUTTONS order), then these.
-const KB_EXTRA: [&str; 6] = ["L2", "R2", "Move forward", "Move back", "Move left", "Move right"];
-const KB_DEFAULT: [&str; 22] = [
-    "Space", "C", "R", "F", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Q", "E", "X", "B", "Enter", "Backspace", "T", "Home", "", "", "W", "S", "A", "D",
-];
-
-fn kb_action_name(i: usize) -> &'static str {
-    remote::BUTTONS.get(i).copied().unwrap_or_else(|| KB_EXTRA[i - 16])
-}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -138,13 +131,18 @@ impl Default for Settings {
             button_map: std::array::from_fn(|i| i as u8),
             kbm: false,
             mouse_sens: 1.0,
-            keys: KB_DEFAULT.iter().map(|k| k.to_string()).collect(),
+            aim_dead_zone: 0.2,
+            invert_y: false,
+            keys: input::defaults(),
+            keys_version: KEYS_VERSION,
             account_id: String::new(),
             consoles: vec![],
             console: None,
         }
     }
 }
+
+const KEYS_VERSION: u32 = 2;
 
 type LiveKey = (capture::VideoDevice, Option<capture::CamMode>, Option<String>);
 
@@ -212,8 +210,9 @@ struct App {
     invite_entry: String,
     share: Option<Share>,
     discovery_extra: Vec<String>,
-    rebinding: Option<usize>,
-    mouse_stick: egui::Vec2,
+    /// The action being rebound, and whether the click that started it has been released.
+    rebinding: Option<(usize, bool)>,
+    kbm: input::Kbm,
     grabbed: bool,
 }
 
@@ -245,11 +244,12 @@ impl App {
             share: None,
             discovery_extra: vec![],
             rebinding: None,
-            mouse_stick: egui::Vec2::ZERO,
+            kbm: input::Kbm::default(),
             grabbed: false,
         };
-        if app.s.keys.len() != KB_DEFAULT.len() {
-            app.s.keys = KB_DEFAULT.iter().map(|k| k.to_string()).collect();
+        if app.s.keys.len() != input::DEFAULT.len() || app.s.keys_version < KEYS_VERSION {
+            app.s.keys = input::defaults();
+            app.s.keys_version = KEYS_VERSION;
         }
         app.rescan();
         if std::env::var_os("NAGITO_TEST_PATTERN").is_some() {
@@ -943,46 +943,55 @@ impl App {
 
                 group(ui, "Keyboard and mouse");
                 widgets::toggle(ui, &mut self.s.kbm, "Play with keyboard and mouse");
-                note(ui, "The mouse moves the right stick, left click is R2 and right click is L2. Press Esc to get the cursor back.");
-                ui.horizontal(|ui| {
-                    ui.label("Mouse speed");
-                    ui.spacing_mut().slider_width = ui.available_width() - 56.0;
-                    ui.add(egui::Slider::new(&mut self.s.mouse_sens, 0.2..=3.0).show_value(false));
-                    ui.label(egui::RichText::new(format!("{:.1}×", self.s.mouse_sens)).color(HAZE));
-                });
+                note(ui, "For Remote Play. The mouse aims with the right stick, WASD moves, and every key, mouse button and wheel direction can be rebound. Esc leaves the game and frees the cursor.");
+                let slider = |ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>, text: String| {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        ui.spacing_mut().slider_width = ui.available_width() - 56.0;
+                        ui.add(egui::Slider::new(v, range).show_value(false));
+                        ui.label(egui::RichText::new(text).color(HAZE));
+                    });
+                };
+                let sens = format!("{:.1}×", self.s.mouse_sens);
+                slider(ui, "Mouse speed", &mut self.s.mouse_sens, 0.2..=4.0, sens);
+                let dz = format!("{:.0}%", self.s.aim_dead_zone * 100.0);
+                slider(ui, "Aim dead zone", &mut self.s.aim_dead_zone, 0.0..=0.4, dz);
+                note(ui, "Raise the dead zone if small mouse moves do nothing in game; lower it if aim feels jumpy.");
+                widgets::toggle(ui, &mut self.s.invert_y, "Invert mouse up and down");
                 egui::CollapsingHeader::new("Key bindings").id_salt("keys").show(ui, |ui| {
-                    note(ui, "Click a key, then press the new one. Esc clears it.");
-                    for i in 0..KB_DEFAULT.len() {
+                    note(ui, "Click a binding, then press a key, mouse button or scroll the wheel. Esc clears it.");
+                    for i in 0..input::DEFAULT.len() {
                         ui.horizontal(|ui| {
-                            ui.label(kb_action_name(i));
+                            ui.label(input::action_name(i));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let text = if self.rebinding == Some(i) {
-                                    "Press a key…".to_owned()
+                                let text = if self.rebinding.is_some_and(|r| r.0 == i) {
+                                    "Press something…".to_owned()
                                 } else if self.s.keys[i].is_empty() {
                                     "None".to_owned()
                                 } else {
                                     self.s.keys[i].clone()
                                 };
                                 if ui.add(egui::Button::new(text).min_size(vec2(150.0, 0.0))).clicked() {
-                                    self.rebinding = Some(i);
+                                    self.rebinding = Some((i, false));
                                 }
                             });
                         });
                     }
-                    if ui.button("Reset keys").clicked() {
-                        self.s.keys = KB_DEFAULT.iter().map(|k| k.to_string()).collect();
+                    if ui.button("Reset bindings").clicked() {
+                        self.s.keys = input::defaults();
                     }
                 });
-                if let Some(i) = self.rebinding {
-                    let pressed = ui.ctx().input(|inp| {
-                        inp.events.iter().find_map(|e| match e {
-                            egui::Event::Key { key, pressed: true, repeat: false, .. } => Some(*key),
-                            _ => None,
-                        })
-                    });
-                    if let Some(k) = pressed {
-                        self.s.keys[i] = if k == egui::Key::Escape { String::new() } else { k.name().to_owned() };
+                if let Some((i, armed)) = self.rebinding {
+                    let (got, idle) = ui.ctx().input(|inp| (input::capture(inp, armed), !inp.pointer.any_down() && inp.modifiers.is_none()));
+                    if let Some(name) = got.filter(|_| armed || idle) {
+                        // one binding per input: take it away from any other action first
+                        for k in self.s.keys.iter_mut().filter(|k| !name.is_empty() && **k == name) {
+                            k.clear();
+                        }
+                        self.s.keys[i] = name;
                         self.rebinding = None;
+                    } else if !armed && idle {
+                        self.rebinding = Some((i, true));
                     }
                 }
 
@@ -1154,30 +1163,13 @@ impl App {
         }
     }
 
-    /// Keyboard and mouse as a controller: keys from the bindings, mouse speed on the right stick.
+    /// Keyboard and mouse as a controller, polled at 250 Hz while playing so aim stays responsive.
     fn kbm_input(&mut self, ctx: &egui::Context) -> remote::Input {
-        let s = &self.s;
-        let (input, motion, dt) = ctx.input(|i| {
-            let down = |a: usize| s.key(a).is_some_and(|k| i.key_down(k));
-            let mut inp = remote::Input::default();
-            for b in 0..16 {
-                if down(b) {
-                    inp.buttons |= 1 << b;
-                }
-            }
-            inp.l2 = if down(16) || i.pointer.secondary_down() { 255 } else { 0 };
-            inp.r2 = if down(17) || i.pointer.primary_down() { 255 } else { 0 };
-            let axis = |neg: usize, pos: usize| (down(pos) as i32 - down(neg) as i32) * 32767;
-            inp.ly = axis(18, 19) as i16;
-            inp.lx = axis(20, 21) as i16;
-            let motion: egui::Vec2 = i.events.iter().filter_map(|e| if let egui::Event::MouseMoved(d) = e { Some(*d) } else { None }).fold(egui::Vec2::ZERO, |a, b| a + b);
-            (inp, motion, i.unstable_dt.max(1.0 / 500.0))
-        });
-        // Mouse speed in px/s becomes stick deflection, pushed past the game's dead zone.
-        let target = (motion / dt * (s.mouse_sens / 1800.0)).clamp(egui::Vec2::splat(-1.0), egui::Vec2::splat(1.0));
-        self.mouse_stick = self.mouse_stick * 0.4 + target * 0.6;
-        let stick = |v: f32| if v.abs() < 0.01 { 0 } else { ((v.signum() * (0.2 + 0.8 * v.abs())) * 32767.0) as i16 };
-        remote::Input { rx: stick(self.mouse_stick.x), ry: stick(self.mouse_stick.y), ..input }
+        let aim = input::Aim { sensitivity: self.s.mouse_sens, dead_zone: self.s.aim_dead_zone, invert_y: self.s.invert_y };
+        let (keys, kbm) = (&self.s.keys, &mut self.kbm);
+        let inp = ctx.input(|i| kbm.read(i, keys, &aim));
+        ctx.request_repaint_after(Duration::from_millis(4));
+        inp
     }
 }
 
@@ -1277,13 +1269,15 @@ impl eframe::App for App {
             }
         }
         let pin_open = self.stats().is_some_and(|s| s.pin.is_some());
-        let kbm = self.playing && self.s.kbm && !pin_open;
+        // Alt-Tab or a click elsewhere releases every key instead of leaving them stuck down.
+        let focused = ctx.input(|i| i.focused);
+        let kbm = self.playing && self.s.kbm && !pin_open && focused && self.s.source == Source::RemotePlay;
         let input = if kbm { self.kbm_input(ctx) } else { remote::Input::default() };
         if let Some(Session::Remote(stream)) = self.live.as_ref().map(|l| &l.session) {
             stream.poll_stats();
             stream.set_input(input);
         }
-        let grab = kbm && self.s.source == Source::RemotePlay;
+        let grab = kbm;
         if grab != self.grabbed {
             self.grabbed = grab;
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if grab { egui::CursorGrab::Confined } else { egui::CursorGrab::None }));
